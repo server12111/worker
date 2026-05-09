@@ -86,12 +86,33 @@ async def ping():
 async def health(x_worker_secret: str = Header("")):
     _check(x_worker_secret)
     try:
-        import psutil
-        ram_free = int(psutil.virtual_memory().available / 1024 / 1024)
+        ram_free = _container_ram_free_mb()
     except Exception:
         ram_free = 0
     bots = len(os.listdir(BOTS_DIR)) if os.path.exists(BOTS_DIR) else 0
     return {"ok": True, "bots": bots, "running": _count_running(), "ram_free_mb": ram_free}
+
+
+def _container_ram_free_mb() -> int:
+    # cgroup v2
+    try:
+        limit = int(open("/sys/fs/cgroup/memory.max").read().strip())
+        usage = int(open("/sys/fs/cgroup/memory.current").read().strip())
+        if limit > 0:
+            return (limit - usage) // 1024 // 1024
+    except Exception:
+        pass
+    # cgroup v1
+    try:
+        limit = int(open("/sys/fs/cgroup/memory/memory.limit_in_bytes").read().strip())
+        usage = int(open("/sys/fs/cgroup/memory/memory.usage_in_bytes").read().strip())
+        max_val = 9 * 1024 ** 3  # ignore "no limit" value (> 9GB)
+        if 0 < limit < max_val:
+            return (limit - usage) // 1024 // 1024
+    except Exception:
+        pass
+    import psutil
+    return int(psutil.virtual_memory().available / 1024 / 1024)
 
 
 def _count_running() -> int:
