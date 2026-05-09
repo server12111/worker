@@ -1,8 +1,10 @@
 """
-Worker API — запускається на кожному воркер-сервері.
-python worker_api.py
+Worker API + Telegram Bot
+- FastAPI HTTP сервер на WORKER_PORT (default 8000)
+- Telegram бот: /start → показує IP, порт і WORKER_SECRET для додавання в адмін-панель
 
-Змінні оточення:
+Змінні оточення (.env):
+  BOT_TOKEN      — токен Telegram бота (для /start команди)
   WORKER_SECRET  — секретний ключ (обов'язково)
   WORKER_PORT    — порт (за замовчуванням 8000)
 """
@@ -10,13 +12,20 @@ import asyncio
 import os
 import shutil
 import sys
+import threading
+import urllib.request
 import zipfile
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, File, Form, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+load_dotenv()
+
 WORKER_SECRET = os.getenv("WORKER_SECRET", "")
+WORKER_PORT = int(os.getenv("WORKER_PORT", "8000"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOTS_DIR = "bots"
 
 app = FastAPI()
@@ -25,6 +34,14 @@ app = FastAPI()
 def _check(x_worker_secret: str = Header("")):
     if WORKER_SECRET and x_worker_secret != WORKER_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _get_public_ip() -> str:
+    try:
+        with urllib.request.urlopen("https://api.ipify.org", timeout=5) as r:
+            return r.read().decode()
+    except Exception:
+        return "невідомо"
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -36,21 +53,17 @@ async def health(x_worker_secret: str = Header("")):
         ram_free = int(psutil.virtual_memory().available / 1024 / 1024)
     except Exception:
         ram_free = 0
-    bots_dir = BOTS_DIR
-    bots = len(os.listdir(bots_dir)) if os.path.exists(bots_dir) else 0
-    running = _count_running()
-    return {"ok": True, "bots": bots, "running": running, "ram_free_mb": ram_free}
+    bots = len(os.listdir(BOTS_DIR)) if os.path.exists(BOTS_DIR) else 0
+    return {"ok": True, "bots": bots, "running": _count_running(), "ram_free_mb": ram_free}
 
 
 def _count_running() -> int:
     try:
         import psutil
-        count = 0
-        for p in psutil.process_iter(["cmdline"]):
-            cmdline = " ".join(p.info.get("cmdline") or [])
-            if "bots/" in cmdline and "python" in cmdline:
-                count += 1
-        return count
+        return sum(
+            1 for p in psutil.process_iter(["cmdline"])
+            if "bots/" in " ".join(p.info.get("cmdline") or []) and "python" in " ".join(p.info.get("cmdline") or [])
+        )
     except Exception:
         return 0
 
@@ -131,16 +144,14 @@ async def start_bot(bot_name: str, x_worker_secret: str = Header("")):
     entry = _find_entry(bot_path)
     if not entry:
         return {"ok": False, "msg": "Точку входу не знайдено"}
-    env_file = os.path.join(bot_path, ".env")
     env = os.environ.copy()
+    env_file = os.path.join(bot_path, ".env")
     if os.path.exists(env_file):
         from dotenv import dotenv_values
         env.update(dotenv_values(env_file))
-    log_path = os.path.join(bot_path, "bot.log")
-    log_f = open(log_path, "a")
+    log_f = open(os.path.join(bot_path, "bot.log"), "a")
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, entry,
-        cwd=bot_path, env=env,
+        sys.executable, entry, cwd=bot_path, env=env,
         stdout=log_f, stderr=log_f,
     )
     _procs[bot_name] = proc
@@ -170,8 +181,7 @@ async def delete_bot(bot_name: str, x_worker_secret: str = Header("")):
     if proc and proc.returncode is None:
         proc.terminate()
         _procs.pop(bot_name, None)
-    bot_path = os.path.join(BOTS_DIR, bot_name)
-    shutil.rmtree(bot_path, ignore_errors=True)
+    shutil.rmtree(os.path.join(BOTS_DIR, bot_name), ignore_errors=True)
     return {"ok": True, "msg": "Видалено"}
 
 
@@ -194,14 +204,13 @@ async def resources(x_worker_secret: str = Header("")):
     try:
         import psutil
         result = []
-        for bot_name, proc in list(_procs.items()):
+        for name, proc in list(_procs.items()):
             if proc.returncode is not None:
                 continue
             try:
                 p = psutil.Process(proc.pid)
                 result.append({
-                    "name": bot_name,
-                    "display": bot_name,
+                    "name": name, "display": name,
                     "cpu": round(p.cpu_percent(interval=0.1), 1),
                     "ram_mb": round(p.memory_info().rss / 1024 / 1024, 1),
                 })
@@ -212,7 +221,7 @@ async def resources(x_worker_secret: str = Header("")):
         return []
 
 
-# ── Install packages ──────────────────────────────────────────────────────────
+# ── Install ───────────────────────────────────────────────────────────────────
 class InstallBody(BaseModel):
     packages: list[str]
 
@@ -220,12 +229,10 @@ class InstallBody(BaseModel):
 @app.post("/install/{bot_name}")
 async def install_packages(bot_name: str, body: InstallBody, x_worker_secret: str = Header("")):
     _check(x_worker_secret)
-    bot_path = os.path.join(BOTS_DIR, bot_name)
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "pip", "install", *body.packages,
-        cwd=bot_path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        cwd=os.path.join(BOTS_DIR, bot_name),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
@@ -251,8 +258,7 @@ class ConfigBody(BaseModel):
 @app.post("/config/{bot_name}")
 async def save_config(bot_name: str, body: ConfigBody, x_worker_secret: str = Header("")):
     _check(x_worker_secret)
-    env_file = os.path.join(BOTS_DIR, bot_name, ".env")
-    with open(env_file, "w", encoding="utf-8") as f:
+    with open(os.path.join(BOTS_DIR, bot_name, ".env"), "w", encoding="utf-8") as f:
         f.write(body.content + "\n")
     return {"ok": True}
 
@@ -267,11 +273,10 @@ async def list_files(bot_name: str, x_worker_secret: str = Header("")):
     bot_path = os.path.join(BOTS_DIR, bot_name)
     if not os.path.exists(bot_path):
         return {"files": []}
-    files = sorted([
+    return {"files": sorted(
         f for f in os.listdir(bot_path)
         if os.path.isfile(os.path.join(bot_path, f)) and f not in HIDDEN
-    ])
-    return {"files": files}
+    )}
 
 
 @app.get("/files/{bot_name}/{fname}")
@@ -281,8 +286,7 @@ async def download_file(bot_name: str, fname: str, x_worker_secret: str = Header
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404)
     with open(file_path, "rb") as f:
-        data = f.read()
-    return Response(content=data, media_type="application/octet-stream")
+        return Response(content=f.read(), media_type="application/octet-stream")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -297,8 +301,7 @@ def _find_entry(bot_path: str) -> str | None:
         for name in ("main.py", "bot.py"):
             if os.path.exists(os.path.join(sub, name)):
                 for item in os.listdir(sub):
-                    src = os.path.join(sub, item)
-                    dst = os.path.join(bot_path, item)
+                    src, dst = os.path.join(sub, item), os.path.join(bot_path, item)
                     if not os.path.exists(dst):
                         shutil.move(src, dst)
                 shutil.rmtree(sub, ignore_errors=True)
@@ -312,15 +315,43 @@ async def _pip_install(bot_path: str):
         return
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "pip", "install", "-r", req,
-        cwd=bot_path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     await proc.communicate()
 
 
+# ── Telegram Bot (/start → показує IP + секрет) ───────────────────────────────
+def _run_telegram_bot():
+    if not BOT_TOKEN:
+        return
+    from telegram import Update
+    from telegram.ext import Application, CommandHandler, ContextTypes
+
+    async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        ip = _get_public_ip()
+        secret_line = f"🔑 Secret: <code>{WORKER_SECRET}</code>\n\n" if WORKER_SECRET else ""
+        await update.message.reply_text(
+            f"🖥 <b>Worker API</b>\n\n"
+            f"IP: <code>{ip}</code>\n"
+            f"Port: <code>{WORKER_PORT}</code>\n"
+            f"URL: <code>http://{ip}:{WORKER_PORT}</code>\n\n"
+            f"{secret_line}"
+            f"Додайте цей воркер в адмін-панелі головного бота:\n"
+            f"🛠 Адмін → 🖥 Воркеры → ➕ Добавити воркер",
+            parse_mode="HTML",
+        )
+
+    tg_app = Application.builder().token(BOT_TOKEN).build()
+    tg_app.add_handler(CommandHandler("start", start_cmd))
+    tg_app.run_polling()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("WORKER_PORT", "8000"))
-    print(f"Worker API starting on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+    t = threading.Thread(target=_run_telegram_bot, daemon=True)
+    t.start()
+
+    print(f"Worker API starting on port {WORKER_PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=WORKER_PORT)
