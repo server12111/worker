@@ -12,13 +12,15 @@ import asyncio
 import os
 import secrets
 import shutil
+import socket
 import sys
 import threading
 import urllib.request
 import zipfile
 
+import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, File, Form, UploadFile
+from fastapi import FastAPI, Header, HTTPException, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
@@ -192,10 +194,31 @@ async def deploy_git(body: GitDeploy, x_worker_secret: str = Header("")):
 
 # ── Start / Stop ──────────────────────────────────────────────────────────────
 _procs: dict[str, asyncio.subprocess.Process] = {}
+_bot_ports: dict[str, int] = {}
+BOT_PORT_START = 8100
+BOT_PORT_END = 8999
+
+
+def _alloc_port() -> int:
+    used = set(_bot_ports.values())
+    for port in range(BOT_PORT_START, BOT_PORT_END):
+        if port in used:
+            continue
+        with socket.socket() as s:
+            try:
+                s.bind(("", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError("Немає вільних портів")
+
+
+class StartBody(BaseModel):
+    public_url: str = ""
 
 
 @app.post("/start/{bot_name}")
-async def start_bot(bot_name: str, x_worker_secret: str = Header("")):
+async def start_bot(bot_name: str, body: StartBody = StartBody(), x_worker_secret: str = Header("")):
     _check(x_worker_secret)
     if bot_name in _procs and _procs[bot_name].returncode is None:
         return {"ok": True, "msg": "Вже запущено"}
@@ -208,6 +231,13 @@ async def start_bot(bot_name: str, x_worker_secret: str = Header("")):
     if os.path.exists(env_file):
         from dotenv import dotenv_values
         env.update(dotenv_values(env_file))
+    port = _alloc_port()
+    _bot_ports[bot_name] = port
+    env["PORT"] = str(port)
+    env["WEBHOOK_PORT"] = str(port)
+    if body.public_url:
+        env["WEBHOOK_URL"] = f"{body.public_url}/bot/{bot_name}"
+        env["WEBHOOK_HOST"] = "0.0.0.0"
     log_f = open(os.path.join(bot_path, "bot.log"), "a")
     proc = await asyncio.create_subprocess_exec(
         sys.executable, entry, cwd=bot_path, env=env,
@@ -229,6 +259,7 @@ async def stop_bot(bot_name: str, x_worker_secret: str = Header("")):
     except asyncio.TimeoutError:
         proc.kill()
     _procs.pop(bot_name, None)
+    _bot_ports.pop(bot_name, None)
     return {"ok": True, "msg": "Зупинено"}
 
 
@@ -240,8 +271,31 @@ async def delete_bot(bot_name: str, x_worker_secret: str = Header("")):
     if proc and proc.returncode is None:
         proc.terminate()
         _procs.pop(bot_name, None)
+    _bot_ports.pop(bot_name, None)
     shutil.rmtree(os.path.join(BOTS_DIR, bot_name), ignore_errors=True)
     return {"ok": True, "msg": "Видалено"}
+
+
+# ── Webhook Proxy ─────────────────────────────────────────────────────────────
+@app.api_route("/bot/{bot_name}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def proxy_to_bot(bot_name: str, path: str, request: Request):
+    port = _bot_ports.get(bot_name)
+    if not port:
+        raise HTTPException(status_code=503, detail="Бот не запущено")
+    url = f"http://localhost:{port}/{path}"
+    headers = {k: v for k, v in request.headers.items()
+               if k.lower() not in ("host", "content-length")}
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.request(
+                request.method, url, content=body,
+                headers=headers, params=dict(request.query_params),
+            )
+            return Response(content=r.content, status_code=r.status_code,
+                            media_type=r.headers.get("content-type"))
+    except httpx.ConnectError:
+        raise HTTPException(status_code=502, detail="Бот не відповідає")
 
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
