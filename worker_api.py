@@ -147,20 +147,20 @@ async def deploy(
             for member in zf.namelist():
                 if ".." in member or os.path.isabs(member):
                     shutil.rmtree(bot_path, ignore_errors=True)
-                    return JSONResponse({"ok": False, "entry": "Небезпечний шлях у ZIP"})
+                    return JSONResponse({"ok": False, "error": "Небезпечний шлях у ZIP"})
             zf.extractall(bot_path)
     except zipfile.BadZipFile:
         shutil.rmtree(bot_path, ignore_errors=True)
-        return JSONResponse({"ok": False, "entry": "Поганий ZIP"})
+        return JSONResponse({"ok": False, "error": "Поганий ZIP"})
     finally:
         if os.path.exists(zip_temp):
             os.remove(zip_temp)
     entry = _find_entry(bot_path)
     if not entry:
         shutil.rmtree(bot_path, ignore_errors=True)
-        return JSONResponse({"ok": False, "entry": "Не знайдено main.py або bot.py"})
+        return JSONResponse({"ok": False, "error": "Не знайдено main.py або bot.py"})
     await _pip_install(bot_path)
-    return JSONResponse({"ok": True, "entry": entry})
+    return JSONResponse({"ok": True, "entry_point": entry})
 
 
 # ── Deploy Git ────────────────────────────────────────────────────────────────
@@ -180,13 +180,13 @@ async def deploy_git(body: GitDeploy, x_worker_secret: str = Header("")):
         git.Repo.clone_from(body.git_url, bot_path, depth=1)
     except Exception as e:
         shutil.rmtree(bot_path, ignore_errors=True)
-        return JSONResponse({"ok": False, "entry": str(e)[:300]})
+        return JSONResponse({"ok": False, "error": str(e)[:300]})
     entry = _find_entry(bot_path)
     if not entry:
         shutil.rmtree(bot_path, ignore_errors=True)
-        return JSONResponse({"ok": False, "entry": "Не знайдено main.py або bot.py"})
+        return JSONResponse({"ok": False, "error": "Не знайдено main.py або bot.py"})
     await _pip_install(bot_path)
-    return JSONResponse({"ok": True, "entry": entry})
+    return JSONResponse({"ok": True, "entry_point": entry})
 
 
 # ── Start / Stop ──────────────────────────────────────────────────────────────
