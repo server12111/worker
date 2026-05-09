@@ -81,6 +81,11 @@ def _get_public_ip() -> str:
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
+@app.get("/ping")
+async def ping():
+    return {"ok": True}
+
+
 @app.get("/health")
 async def health(x_worker_secret: str = Header("")):
     _check(x_worker_secret)
