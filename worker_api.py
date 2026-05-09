@@ -62,6 +62,11 @@ WORKER_SECRET = _ensure_secret()
 app = FastAPI()
 
 
+@app.on_event("startup")
+async def _startup_log():
+    print(f"[worker-startup] PORT={os.getenv('PORT')!r} WORKER_PORT={os.getenv('WORKER_PORT')!r} bound={WORKER_PORT}", flush=True)
+
+
 def _check(x_worker_secret: str = Header("")):
     if WORKER_SECRET and x_worker_secret != WORKER_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
