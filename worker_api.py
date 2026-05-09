@@ -24,19 +24,34 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-WORKER_PORT = int(os.getenv("PORT", os.getenv("WORKER_PORT", "8000")))
+WORKER_PORT = int(os.getenv("WORKER_PORT", "8000"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOTS_DIR = "bots"
-ENV_FILE = ".env"
+SECRET_FILE = "/app/data/worker_secret.txt"
+
+print(f"[worker] WORKER_PORT env={os.getenv('WORKER_PORT')} PORT env={os.getenv('PORT')} → using {WORKER_PORT}")
 
 
 def _ensure_secret() -> str:
     secret = os.getenv("WORKER_SECRET", "").strip()
     if secret:
         return secret
+    if os.path.exists(SECRET_FILE):
+        try:
+            with open(SECRET_FILE) as f:
+                secret = f.read().strip()
+            if secret:
+                os.environ["WORKER_SECRET"] = secret
+                return secret
+        except Exception:
+            pass
     secret = secrets.token_hex(16)
-    with open(ENV_FILE, "a") as f:
-        f.write(f"\nWORKER_SECRET={secret}\n")
+    try:
+        os.makedirs(os.path.dirname(SECRET_FILE), exist_ok=True)
+        with open(SECRET_FILE, "w") as f:
+            f.write(secret)
+    except Exception:
+        pass
     os.environ["WORKER_SECRET"] = secret
     print(f"[worker] Generated WORKER_SECRET={secret}")
     return secret
