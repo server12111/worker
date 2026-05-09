@@ -341,9 +341,6 @@ def _run_telegram_bot():
     if not BOT_TOKEN:
         return
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     from telegram import Update
     from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -360,9 +357,17 @@ def _run_telegram_bot():
             parse_mode="HTML",
         )
 
-    tg_app = Application.builder().token(BOT_TOKEN).build()
-    tg_app.add_handler(CommandHandler("start", start_cmd))
-    tg_app.run_polling()
+    async def _run():
+        tg_app = Application.builder().token(BOT_TOKEN).build()
+        tg_app.add_handler(CommandHandler("start", start_cmd))
+        async with tg_app:
+            await tg_app.start()
+            await tg_app.updater.start_polling()
+            await asyncio.Event().wait()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(_run())
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
