@@ -175,6 +175,7 @@ class GitDeploy(BaseModel):
 async def deploy_git(body: GitDeploy, x_worker_secret: str = Header("")):
     _check(x_worker_secret)
     bot_path = os.path.join(BOTS_DIR, body.bot_name)
+    shutil.rmtree(bot_path, ignore_errors=True)
     try:
         import git
         git.Repo.clone_from(body.git_url, bot_path, depth=1)
