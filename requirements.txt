@@ -1,4 +1,4 @@
-# worker api v2
+# worker api v3
 python-telegram-bot==21.6
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
