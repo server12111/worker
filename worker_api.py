@@ -24,12 +24,12 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-WORKER_PORT = int(os.getenv("WORKER_PORT", "8000"))
+WORKER_PORT = int(os.getenv("PORT", os.getenv("WORKER_PORT", "8000")))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOTS_DIR = "bots"
 SECRET_FILE = "/app/data/worker_secret.txt"
 
-print(f"[worker] WORKER_PORT env={os.getenv('WORKER_PORT')} PORT env={os.getenv('PORT')} → using {WORKER_PORT}")
+print(f"[worker] PORT={os.getenv('PORT')} WORKER_PORT={os.getenv('WORKER_PORT')} → using {WORKER_PORT}")
 
 
 def _ensure_secret() -> str:
