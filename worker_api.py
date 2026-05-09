@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-WORKER_PORT = int(os.getenv("WORKER_PORT", "8000"))
+WORKER_PORT = int(os.getenv("PORT", os.getenv("WORKER_PORT", "8000")))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOTS_DIR = "bots"
 ENV_FILE = ".env"
