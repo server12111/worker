@@ -10,6 +10,7 @@ Worker API + Telegram Bot
 """
 import asyncio
 import os
+import secrets
 import shutil
 import sys
 import threading
@@ -23,10 +24,25 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-WORKER_SECRET = os.getenv("WORKER_SECRET", "")
 WORKER_PORT = int(os.getenv("WORKER_PORT", "8000"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOTS_DIR = "bots"
+ENV_FILE = ".env"
+
+
+def _ensure_secret() -> str:
+    secret = os.getenv("WORKER_SECRET", "").strip()
+    if secret:
+        return secret
+    secret = secrets.token_hex(16)
+    with open(ENV_FILE, "a") as f:
+        f.write(f"\nWORKER_SECRET={secret}\n")
+    os.environ["WORKER_SECRET"] = secret
+    print(f"[worker] Generated WORKER_SECRET={secret}")
+    return secret
+
+
+WORKER_SECRET = _ensure_secret()
 
 app = FastAPI()
 
@@ -324,18 +340,21 @@ async def _pip_install(bot_path: str):
 def _run_telegram_bot():
     if not BOT_TOKEN:
         return
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     from telegram import Update
     from telegram.ext import Application, CommandHandler, ContextTypes
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ip = _get_public_ip()
-        secret_line = f"🔑 Secret: <code>{WORKER_SECRET}</code>\n\n" if WORKER_SECRET else ""
         await update.message.reply_text(
             f"🖥 <b>Worker API</b>\n\n"
             f"IP: <code>{ip}</code>\n"
             f"Port: <code>{WORKER_PORT}</code>\n"
             f"URL: <code>http://{ip}:{WORKER_PORT}</code>\n\n"
-            f"{secret_line}"
+            f"🔑 Secret: <code>{WORKER_SECRET}</code>\n\n"
             f"Додайте цей воркер в адмін-панелі головного бота:\n"
             f"🛠 Адмін → 🖥 Воркеры → ➕ Добавити воркер",
             parse_mode="HTML",
