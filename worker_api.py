@@ -65,8 +65,26 @@ def _ensure_secret() -> str:
 WORKER_SECRET = _ensure_secret()
 
 
+def _start_ngrok_sync():
+    token = os.getenv("NGROK_TOKEN", "")
+    if not token:
+        return
+    try:
+        from pyngrok import ngrok, conf
+        conf.get_default().auth_token = token
+        tunnel = ngrok.connect(WORKER_PORT, "http")
+        url = tunnel.public_url.replace("http://", "https://")
+        os.environ["PUBLIC_URL"] = url
+        print(f"[ngrok] Tunnel: {url}")
+    except Exception as e:
+        print(f"[ngrok] Error starting ngrok: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if os.getenv("NGROK_TOKEN"):
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _start_ngrok_sync)
     asyncio.create_task(_watchdog())
     yield
 
