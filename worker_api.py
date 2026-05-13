@@ -554,12 +554,22 @@ def _run_telegram_bot():
     from telegram.ext import Application, CommandHandler, ContextTypes
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        ip = _get_public_ip()
+        public_url = os.getenv("PUBLIC_URL", "").rstrip("/")
+        if public_url:
+            url_line = f"URL: <code>{public_url}</code>"
+            url_note = f"\n⚠️ Саме цей URL додавайте в адмін-панель (не IP:порт)"
+        else:
+            ip = _get_public_ip()
+            url_line = (
+                f"IP: <code>{ip}</code>\n"
+                f"Port: <code>{WORKER_PORT}</code>\n"
+                f"URL: <code>http://{ip}:{WORKER_PORT}</code>\n"
+                f"⚠️ Встановіть змінну PUBLIC_URL з вашим доменом bothost.ru"
+            )
+            url_note = ""
         await update.message.reply_text(
             f"🖥 <b>Worker API</b>\n\n"
-            f"IP: <code>{ip}</code>\n"
-            f"Port: <code>{WORKER_PORT}</code>\n"
-            f"URL: <code>http://{ip}:{WORKER_PORT}</code>\n\n"
+            f"{url_line}{url_note}\n\n"
             f"🔑 Secret: <code>{WORKER_SECRET}</code>\n\n"
             f"Додайте цей воркер в адмін-панелі головного бота:\n"
             f"🛠 Адмін → 🖥 Воркеры → ➕ Добавити воркер",
