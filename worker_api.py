@@ -15,6 +15,7 @@ import shutil
 import socket
 import sys
 import threading
+import time
 import urllib.request
 import zipfile
 
@@ -195,8 +196,16 @@ async def deploy_git(body: GitDeploy, x_worker_secret: str = Header("")):
 # ── Start / Stop ──────────────────────────────────────────────────────────────
 _procs: dict[str, asyncio.subprocess.Process] = {}
 _bot_ports: dict[str, int] = {}
+_bot_public_urls: dict[str, str] = {}
+_bot_start_times: dict[str, float] = {}
+_restart_counts: dict[str, int] = {}
+_stopped_manually: set[str] = set()
+_crash_events: list[dict] = []
+
 BOT_PORT_START = 8100
 BOT_PORT_END = 8999
+MAX_RESTARTS = 3
+RESTART_WINDOW = 300  # секунды — если бот проработал дольше, счётчик сбрасывается
 
 
 def _alloc_port() -> int:
@@ -244,6 +253,10 @@ async def start_bot(bot_name: str, body: StartBody = StartBody(), x_worker_secre
         stdout=log_f, stderr=log_f,
     )
     _procs[bot_name] = proc
+    _bot_public_urls[bot_name] = body.public_url
+    _bot_start_times[bot_name] = time.monotonic()
+    _restart_counts[bot_name] = 0
+    _stopped_manually.discard(bot_name)
     return {"ok": True, "msg": f"Запущено (PID {proc.pid})"}
 
 
@@ -253,6 +266,7 @@ async def stop_bot(bot_name: str, x_worker_secret: str = Header("")):
     proc = _procs.get(bot_name)
     if not proc or proc.returncode is not None:
         return {"ok": True, "msg": "Вже зупинено"}
+    _stopped_manually.add(bot_name)
     proc.terminate()
     try:
         await asyncio.wait_for(proc.wait(), timeout=5)
@@ -267,11 +281,14 @@ async def stop_bot(bot_name: str, x_worker_secret: str = Header("")):
 @app.delete("/bots/{bot_name}")
 async def delete_bot(bot_name: str, x_worker_secret: str = Header("")):
     _check(x_worker_secret)
+    _stopped_manually.add(bot_name)
     proc = _procs.get(bot_name)
     if proc and proc.returncode is None:
         proc.terminate()
         _procs.pop(bot_name, None)
     _bot_ports.pop(bot_name, None)
+    _bot_public_urls.pop(bot_name, None)
+    _restart_counts.pop(bot_name, None)
     shutil.rmtree(os.path.join(BOTS_DIR, bot_name), ignore_errors=True)
     return {"ok": True, "msg": "Видалено"}
 
@@ -296,6 +313,98 @@ async def proxy_to_bot(bot_name: str, path: str, request: Request):
                             media_type=r.headers.get("content-type"))
     except httpx.ConnectError:
         raise HTTPException(status_code=502, detail="Бот не відповідає")
+
+
+# ── Watchdog (авто-рестарт упавших ботов) ────────────────────────────────────
+async def _watchdog():
+    await asyncio.sleep(15)
+    while True:
+        await asyncio.sleep(30)
+        for bot_name, proc in list(_procs.items()):
+            if proc.returncode is None:
+                continue
+            if bot_name in _stopped_manually:
+                _procs.pop(bot_name, None)
+                continue
+
+            ran_for = time.monotonic() - _bot_start_times.get(bot_name, 0)
+            if ran_for > RESTART_WINDOW:
+                _restart_counts[bot_name] = 0
+
+            count = _restart_counts.get(bot_name, 0)
+            if count >= MAX_RESTARTS:
+                print(f"[watchdog] {bot_name}: превышен лимит перезапусков, останавливаем")
+                _crash_events.append({
+                    "bot_name": bot_name,
+                    "event": "max_restarts",
+                    "restarts": count,
+                    "ts": time.time(),
+                })
+                _stopped_manually.add(bot_name)
+                _procs.pop(bot_name, None)
+                _bot_ports.pop(bot_name, None)
+                continue
+
+            print(f"[watchdog] {bot_name} упал (exit={proc.returncode}), перезапуск {count + 1}/{MAX_RESTARTS}...")
+            bot_path = os.path.join(BOTS_DIR, bot_name)
+            entry = _find_entry(bot_path)
+            if not entry:
+                print(f"[watchdog] {bot_name}: точка входа не найдена, пропускаем")
+                _procs.pop(bot_name, None)
+                continue
+
+            env = os.environ.copy()
+            env_file = os.path.join(bot_path, ".env")
+            if os.path.exists(env_file):
+                from dotenv import dotenv_values
+                env.update(dotenv_values(env_file))
+
+            port = _bot_ports.get(bot_name)
+            if not port:
+                try:
+                    port = _alloc_port()
+                except RuntimeError:
+                    print(f"[watchdog] {bot_name}: нет свободных портов")
+                    continue
+            _bot_ports[bot_name] = port
+            env["PORT"] = str(port)
+            env["WEBHOOK_PORT"] = str(port)
+            public_url = _bot_public_urls.get(bot_name, "")
+            if public_url:
+                env["WEBHOOK_URL"] = f"{public_url}/bot/{bot_name}"
+                env["WEBHOOK_HOST"] = "0.0.0.0"
+
+            try:
+                log_f = open(os.path.join(bot_path, "bot.log"), "a")
+                new_proc = await asyncio.create_subprocess_exec(
+                    sys.executable, entry, cwd=bot_path, env=env,
+                    stdout=log_f, stderr=log_f,
+                )
+                _procs[bot_name] = new_proc
+                _bot_start_times[bot_name] = time.monotonic()
+                _restart_counts[bot_name] = count + 1
+                _crash_events.append({
+                    "bot_name": bot_name,
+                    "event": "restarted",
+                    "restarts": count + 1,
+                    "ts": time.time(),
+                })
+                print(f"[watchdog] {bot_name}: перезапущен (PID {new_proc.pid})")
+            except Exception as e:
+                print(f"[watchdog] {bot_name}: ошибка перезапуска: {e}")
+
+
+@app.on_event("startup")
+async def _startup():
+    asyncio.create_task(_watchdog())
+
+
+@app.get("/events")
+async def get_events(x_worker_secret: str = Header("")):
+    _check(x_worker_secret)
+    events = list(_crash_events)
+    _crash_events.clear()
+    return {"events": events}
 
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
