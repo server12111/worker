@@ -188,8 +188,8 @@ async def deploy_git(body: GitDeploy, x_worker_secret: str = Header("")):
     bot_path = os.path.join(BOTS_DIR, body.bot_name)
     shutil.rmtree(bot_path, ignore_errors=True)
     try:
-        import git
-        git.Repo.clone_from(body.git_url, bot_path, depth=1)
+        from dulwich import porcelain
+        porcelain.clone(body.git_url, bot_path, depth=1)
     except Exception as e:
         shutil.rmtree(bot_path, ignore_errors=True)
         return JSONResponse({"ok": False, "error": str(e)[:300]})
