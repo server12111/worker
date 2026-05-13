@@ -20,6 +20,8 @@ import urllib.request
 import zipfile
 
 import httpx
+from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -62,7 +64,13 @@ def _ensure_secret() -> str:
 
 WORKER_SECRET = _ensure_secret()
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(_watchdog())
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 
 
@@ -392,11 +400,6 @@ async def _watchdog():
                 print(f"[watchdog] {bot_name}: перезапущен (PID {new_proc.pid})")
             except Exception as e:
                 print(f"[watchdog] {bot_name}: ошибка перезапуска: {e}")
-
-
-@app.on_event("startup")
-async def _startup():
-    asyncio.create_task(_watchdog())
 
 
 @app.get("/events")
