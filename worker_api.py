@@ -581,7 +581,7 @@ def _run_telegram_bot():
         tg_app.add_handler(CommandHandler("start", start_cmd))
         async with tg_app:
             await tg_app.start()
-            await tg_app.updater.start_polling()
+            await tg_app.updater.start_polling(drop_pending_updates=True)
             await asyncio.Event().wait()
 
     loop = asyncio.new_event_loop()
