@@ -84,21 +84,46 @@ async def _run_cf_tunnel(token: str):
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        print(f"[cloudflare] Tunnel started (PID {proc.pid})")
+        print(f"[cloudflare] Named tunnel started (PID {proc.pid})")
         await proc.wait()
-        print("[cloudflare] Tunnel exited")
+        print("[cloudflare] Named tunnel exited")
     except Exception as e:
         print(f"[cloudflare] Error: {e}")
+
+
+async def _run_cf_quick_tunnel():
+    import re
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "cloudflared", "tunnel", "--no-autoupdate",
+            "--url", f"http://localhost:{WORKER_PORT}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        print("[cloudflare] Quick tunnel starting...")
+        async for line in proc.stderr:
+            text = line.decode(errors="replace").strip()
+            m = re.search(r'https://[\w-]+\.trycloudflare\.com', text)
+            if m:
+                url = m.group(0)
+                os.environ["PUBLIC_URL"] = url
+                print(f"[cloudflare] Quick tunnel URL: {url}")
+        await proc.wait()
+    except FileNotFoundError:
+        print("[cloudflare] cloudflared not found, tunnel skipped")
+    except Exception as e:
+        print(f"[cloudflare] Quick tunnel error: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if os.getenv("CF_TUNNEL_TOKEN"):
         asyncio.create_task(_run_cf_tunnel(os.getenv("CF_TUNNEL_TOKEN")))
-        print("[cloudflare] Tunnel starting...")
     elif os.getenv("NGROK_TOKEN"):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _start_ngrok_sync)
+    else:
+        asyncio.create_task(_run_cf_quick_tunnel())
     asyncio.create_task(_watchdog())
     yield
 
