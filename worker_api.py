@@ -12,6 +12,7 @@ Worker API + Telegram Bot
                    які переживають деплой/оновлення коду бота
 """
 import asyncio
+import io
 import os
 import secrets
 import shutil
@@ -577,6 +578,37 @@ async def download_file(bot_name: str, fname: str, x_worker_secret: str = Header
         raise HTTPException(status_code=404)
     with open(file_path, "rb") as f:
         return Response(content=f.read(), media_type="application/octet-stream")
+
+
+# ── Резервна копія БД (для синхронізації з майстер-ботом) ──────────────────────
+@app.get("/data_backup/{bot_name}")
+async def download_data_backup(bot_name: str, x_worker_secret: str = Header("")):
+    _check(x_worker_secret)
+    persist_root = os.path.join(BOT_DATA_ROOT, bot_name)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if os.path.isdir(persist_root):
+            for root, _dirs, files in os.walk(persist_root):
+                for fname in files:
+                    full = os.path.join(root, fname)
+                    zf.write(full, os.path.relpath(full, persist_root))
+    return Response(content=buf.getvalue(), media_type="application/zip")
+
+
+@app.post("/data_backup/{bot_name}")
+async def upload_data_backup(bot_name: str, file: UploadFile = File(...), x_worker_secret: str = Header("")):
+    _check(x_worker_secret)
+    persist_root = os.path.join(BOT_DATA_ROOT, bot_name)
+    data = await file.read()
+    if not data:
+        return {"ok": True}
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for member in zf.namelist():
+            if ".." in member or os.path.isabs(member):
+                return JSONResponse({"ok": False, "error": "Небезпечний шлях у ZIP"})
+        os.makedirs(persist_root, exist_ok=True)
+        zf.extractall(persist_root)
+    return {"ok": True}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
