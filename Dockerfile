@@ -1,5 +1,6 @@
 FROM python:3.11-slim
 WORKDIR /app
+ENV DATA_DIR=/app/data
 RUN mkdir -p /app/data && chmod 777 /app/data
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     curl -fsSL --retry 3 --max-time 30 \

@@ -7,6 +7,9 @@ Worker API + Telegram Bot
   BOT_TOKEN      — токен Telegram бота (для /start команди)
   WORKER_SECRET  — секретний ключ (обов'язково)
   WORKER_PORT    — порт (за замовчуванням 8000)
+  DATA_DIR       — постійна тека на диску (default /app/data), де зберігаються
+                   worker_secret.txt і резервні копії БД ботів (bots/<name>/),
+                   які переживають деплой/оновлення коду бота
 """
 import asyncio
 import os
@@ -205,6 +208,7 @@ async def deploy(
 ):
     _check(x_worker_secret)
     bot_path = os.path.join(BOTS_DIR, bot_name)
+    _sync_to_persistent(bot_name, bot_path)
     os.makedirs(bot_path, exist_ok=True)
     zip_temp = os.path.join(bot_path, "_upload.zip")
     try:
@@ -223,10 +227,11 @@ async def deploy(
     finally:
         if os.path.exists(zip_temp):
             os.remove(zip_temp)
+    _restore_from_persistent(bot_name, bot_path)
     entry = _find_entry(bot_path)
     if not entry:
         shutil.rmtree(bot_path, ignore_errors=True)
-        return JSONResponse({"ok": False, "error": "Не знайдено main.py або bot.py"})
+        return JSONResponse({"ok": False, "error": ENTRY_POINT_NOT_FOUND_ERROR})
     await _pip_install(bot_path)
     return JSONResponse({"ok": True, "entry_point": entry})
 
@@ -243,6 +248,7 @@ class GitDeploy(BaseModel):
 async def deploy_git(body: GitDeploy, x_worker_secret: str = Header("")):
     _check(x_worker_secret)
     bot_path = os.path.join(BOTS_DIR, body.bot_name)
+    _sync_to_persistent(body.bot_name, bot_path)
     shutil.rmtree(bot_path, ignore_errors=True)
     try:
         from dulwich import porcelain
@@ -250,10 +256,11 @@ async def deploy_git(body: GitDeploy, x_worker_secret: str = Header("")):
     except Exception as e:
         shutil.rmtree(bot_path, ignore_errors=True)
         return JSONResponse({"ok": False, "error": str(e)[:300]})
+    _restore_from_persistent(body.bot_name, bot_path)
     entry = _find_entry(bot_path)
     if not entry:
         shutil.rmtree(bot_path, ignore_errors=True)
-        return JSONResponse({"ok": False, "error": "Не знайдено main.py або bot.py"})
+        return JSONResponse({"ok": False, "error": ENTRY_POINT_NOT_FOUND_ERROR})
     await _pip_install(bot_path)
     return JSONResponse({"ok": True, "entry_point": entry})
 
@@ -355,6 +362,7 @@ async def delete_bot(bot_name: str, x_worker_secret: str = Header("")):
     _bot_public_urls.pop(bot_name, None)
     _restart_counts.pop(bot_name, None)
     shutil.rmtree(os.path.join(BOTS_DIR, bot_name), ignore_errors=True)
+    shutil.rmtree(os.path.join(BOT_DATA_ROOT, bot_name), ignore_errors=True)
     return {"ok": True, "msg": "Видалено"}
 
 
@@ -572,15 +580,64 @@ async def download_file(bot_name: str, fname: str, x_worker_secret: str = Header
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+BOT_DATA_ROOT = os.path.join(DATA_DIR, "bots")
+
+DATA_DIR_NAMES = ("data", "database")
+DATA_FILE_EXTS = (".db", ".sqlite", ".sqlite3")
+
+
+def _is_data_file(bot_path: str, root: str, fname: str) -> bool:
+    rel_root = os.path.relpath(root, bot_path)
+    in_data_dir = rel_root != "." and rel_root.split(os.sep)[0] in DATA_DIR_NAMES
+    return in_data_dir or fname.lower().endswith(DATA_FILE_EXTS)
+
+
+def _sync_to_persistent(bot_name: str, bot_path: str):
+    """Mirror the bot's current DB/data files into DATA_DIR before its code dir is wiped/overwritten."""
+    if not os.path.isdir(bot_path):
+        return
+    persist_root = os.path.join(BOT_DATA_ROOT, bot_name)
+    for root, _dirs, files in os.walk(bot_path):
+        for fname in files:
+            if not _is_data_file(bot_path, root, fname):
+                continue
+            src = os.path.join(root, fname)
+            rel_path = os.path.relpath(src, bot_path)
+            dst = os.path.join(persist_root, rel_path)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+
+
+def _restore_from_persistent(bot_name: str, bot_path: str):
+    """Copy DB/data files previously mirrored to DATA_DIR back into the freshly deployed bot dir."""
+    persist_root = os.path.join(BOT_DATA_ROOT, bot_name)
+    if not os.path.isdir(persist_root):
+        return
+    for root, _dirs, files in os.walk(persist_root):
+        for fname in files:
+            src = os.path.join(root, fname)
+            rel_path = os.path.relpath(src, persist_root)
+            dst = os.path.join(bot_path, rel_path)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+
+
+ENTRY_POINT_NAMES = ("main.py", "bot.py", "app.py", "run.py", "start.py", "__main__.py")
+ENTRY_POINT_NOT_FOUND_ERROR = (
+    "Не знайдено жодного з файлів: " + ", ".join(ENTRY_POINT_NAMES)
+)
+
+
 def _find_entry(bot_path: str) -> str | None:
-    for name in ("main.py", "bot.py"):
+    for name in ENTRY_POINT_NAMES:
         if os.path.exists(os.path.join(bot_path, name)):
             return name
     subdirs = [d for d in os.listdir(bot_path)
                if os.path.isdir(os.path.join(bot_path, d)) and d not in ("venv", ".git")]
     if len(subdirs) == 1:
         sub = os.path.join(bot_path, subdirs[0])
-        for name in ("main.py", "bot.py"):
+        for name in ENTRY_POINT_NAMES:
             if os.path.exists(os.path.join(sub, name)):
                 for item in os.listdir(sub):
                     src, dst = os.path.join(sub, item), os.path.join(bot_path, item)
