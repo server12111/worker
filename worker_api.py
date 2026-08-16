@@ -251,6 +251,7 @@ async def deploy_git(body: GitDeploy, x_worker_secret: str = Header("")):
     bot_path = os.path.join(BOTS_DIR, body.bot_name)
     _sync_to_persistent(body.bot_name, bot_path)
     shutil.rmtree(bot_path, ignore_errors=True)
+    os.makedirs(BOTS_DIR, exist_ok=True)
     try:
         from dulwich import porcelain
         porcelain.clone(body.git_url, bot_path, depth=1)
