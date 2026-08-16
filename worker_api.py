@@ -622,6 +622,10 @@ DATA_FILE_EXTS = (".db", ".sqlite", ".sqlite3")
 
 def _is_data_file(bot_path: str, root: str, fname: str) -> bool:
     rel_root = os.path.relpath(root, bot_path)
+    if rel_root == "." and fname == ".env":
+        # .env керується через "Конфіг" на майстер-боті — не даємо
+        # деплою з репозиторію/zip затирати вже налаштовані значення.
+        return True
     in_data_dir = rel_root != "." and rel_root.split(os.sep)[0] in DATA_DIR_NAMES
     return in_data_dir or fname.lower().endswith(DATA_FILE_EXTS)
 
