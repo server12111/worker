@@ -667,6 +667,8 @@ ENTRY_POINT_NOT_FOUND_ERROR = (
 
 
 def _find_entry(bot_path: str) -> str | None:
+    if not os.path.isdir(bot_path):
+        return None
     for name in ENTRY_POINT_NAMES:
         if os.path.exists(os.path.join(bot_path, name)):
             return name
