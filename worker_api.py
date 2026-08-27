@@ -612,6 +612,28 @@ async def upload_data_backup(bot_name: str, file: UploadFile = File(...), x_work
     return {"ok": True}
 
 
+# ── Резервна копія коду (компактна, без .git/venv/даних — для майстер-бота) ────
+CODE_BACKUP_EXCLUDE_DIRS = {".git", "venv", ".venv", "__pycache__", "node_modules", ".pytest_cache"}
+CODE_BACKUP_EXCLUDE_FILES = {"bot.log", "_upload.zip"}
+
+
+@app.get("/code_backup/{bot_name}")
+async def download_code_backup(bot_name: str, x_worker_secret: str = Header("")):
+    _check(x_worker_secret)
+    bot_path = os.path.join(BOTS_DIR, bot_name)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if os.path.isdir(bot_path):
+            for root, dirs, files in os.walk(bot_path):
+                dirs[:] = [d for d in dirs if d not in CODE_BACKUP_EXCLUDE_DIRS]
+                for fname in files:
+                    if fname in CODE_BACKUP_EXCLUDE_FILES or _is_data_file(bot_path, root, fname):
+                        continue
+                    full = os.path.join(root, fname)
+                    zf.write(full, os.path.relpath(full, bot_path))
+    return Response(content=buf.getvalue(), media_type="application/zip")
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 BOT_DATA_ROOT = os.path.join(DATA_DIR, "bots")
@@ -695,7 +717,9 @@ async def _pip_install(bot_path: str):
         sys.executable, "-m", "pip", "install", "-r", req,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    _out, err = await proc.communicate()
+    if proc.returncode != 0:
+        print(f"[deploy] pip install failed for {bot_path}: {(err or b'').decode(errors='replace')[-500:]}")
 
 
 # ── Telegram Bot (/start → показує IP + секрет) ───────────────────────────────
